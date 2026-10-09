@@ -151,9 +151,4 @@ pytest -q test/test_private_rag.py
 
 测试覆盖请求契约、知识库作用域、引用元数据与通用查询路由。完整测试需要先安装 `requirements.txt` 中的依赖。
 
-## 项目材料
 
-- [详细改造说明](PRIVATE_RAG.md)
-- [简历描述与面试要点](RESUME.md)
-
-本项目基于 [EasyRoc/edu-rag](https://github.com/easyroc/edu-rag) 二次开发，简历与面试中应如实说明个人完成的改造范围。
