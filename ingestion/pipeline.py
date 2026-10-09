@@ -15,21 +15,21 @@ from ingestion.cleaner import (
     CleanStats,
     pre_split_docs,
 )
-from core.vectorestore import K12VectorStore
+from core.vectorestore import PrivateDocumentVectorStore
 from utils.logger import logger
 
 
 class IngestionPipeline:
 
-    def __init__(self, vector_store: K12VectorStore):
+    def __init__(self, vector_store: PrivateDocumentVectorStore):
         self.vector_store = vector_store
 
     def process_file(
             self,
             file_path: str,
-            subject: str = "",
-            grade: str = "",
-            chapter: str = "",
+            knowledge_base_id: str = "",
+            document_id: str | None = None,
+            tags: list[str] | None = None,
             strategy: str = "recursive",
     ) -> dict:
         """
@@ -73,9 +73,9 @@ class IngestionPipeline:
         try:
             chunks = split_documents(
                 docs,
-                subject=subject,
-                grade=grade,
-                chapter=chapter,
+                knowledge_base_id=knowledge_base_id,
+                document_id=document_id,
+                tags=tags,
                 strategy=strategy,
             )
             logger.info(f"文档切片完成: {len(chunks)} 个切片")
@@ -102,9 +102,9 @@ class IngestionPipeline:
     def process_sql(
             self,
             adapter: SQLSourceAdapter,
-            subject: str = "",
-            grade: str = "",
-            chapter: str = "",
+            knowledge_base_id: str = "",
+            document_id: str | None = None,
+            tags: list[str] | None = None,
             strategy: str = "recursive",
     ) -> dict:
         """
@@ -112,9 +112,9 @@ class IngestionPipeline:
 
         参数:
             adapter: SQLSourceAdapter（已配置好连接参数和字段映射）
-            subject: 学科
-            grade: 年级
-            chapter: 章节
+            knowledge_base_id: 知识库 ID
+            document_id: 业务文档 ID
+            tags: 文档标签
             strategy: 切片策略
 
         返回处理结果统计。
@@ -165,9 +165,9 @@ class IngestionPipeline:
         try:
             chunks = split_documents(
                 docs,
-                subject=subject,
-                grade=grade,
-                chapter=chapter,
+                knowledge_base_id=knowledge_base_id,
+                document_id=document_id,
+                tags=tags,
                 strategy=strategy,
             )
             logger.info(f"SQL 切片完成: {len(chunks)} 个切片")

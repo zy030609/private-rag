@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Edu-RAG 本地项目管理脚本。
+"""Private-RAG 本地项目管理脚本。
 
 这个脚本面向第一次 clone 项目的用户：把环境初始化、服务启停、样例文档
 上传/删除、健康检查和常用验证命令收敛成一个统一入口。
@@ -74,16 +74,14 @@ class HttpClient:
         url: str,
         file_path: Path,
         *,
-        subject: str,
-        grade: str,
-        chapter: str,
+        knowledge_base_id: str,
+        tags: str,
         strategy: str,
     ) -> dict[str, Any]:
         boundary = f"----edu-rag-{uuid.uuid4().hex}"
         fields = {
-            "subject": subject,
-            "grade": grade,
-            "chapter": chapter,
+            "knowledge_base_id": knowledge_base_id,
+            "tags": tags,
             "strategy": strategy,
         }
         body = self._build_multipart_body(boundary, fields, file_path)
@@ -338,7 +336,7 @@ def print_document_list(response: dict[str, Any]) -> None:
     for doc in docs:
         print(
             f"- {doc.get('id', '')} | {doc.get('title', '')} | "
-            f"{doc.get('subject', '')} {doc.get('grade', '')} | "
+            f"kb={doc.get('knowledge_base_id', '')} | "
             f"chunks={doc.get('chunk_count', 0)} | {doc.get('status', '')}"
         )
 
@@ -362,8 +360,8 @@ def cmd_setup(args: argparse.Namespace) -> int:
 
     print("\n下一步:")
     print(f"  {COMMAND_NAME} start")
-    print(f"  {COMMAND_NAME} upload-samples")
-    print(f"  {COMMAND_NAME} ask \"一元一次方程怎么解？\" --subject 数学 --grade 七年级")
+    print(f"  {COMMAND_NAME} list-kbs")
+    print(f"  {COMMAND_NAME} ask \"公司的报销标准是什么？\" --knowledge-base-id <id>")
     return 0
 
 
@@ -570,8 +568,7 @@ def cmd_ask(args: argparse.Namespace) -> int:
     base_url = build_base_url(root, args.url)
     payload = {
         "query": args.query,
-        "subject": args.subject,
-        "grade": args.grade,
+        "knowledge_base_id": args.knowledge_base_id,
         "user_id": args.user_id,
         "session_id": args.session_id,
     }
@@ -590,15 +587,48 @@ def cmd_ask(args: argparse.Namespace) -> int:
     return 0 if response.get("code", 0) == 0 else 1
 
 
+def cmd_list_kbs(args: argparse.Namespace) -> int:
+    base_url = build_base_url(Path(args.root).resolve(), args.url)
+    response = HttpClient(timeout=args.timeout).get_json(f"{base_url}/api/v1/knowledge-bases")
+    if args.json:
+        print_json(response)
+    else:
+        for item in response.get("data") or []:
+            print(f"- {item.get('id', '')} | {item.get('name', '')} | documents={item.get('document_count', 0)}")
+    return 0
+
+
+def cmd_create_kb(args: argparse.Namespace) -> int:
+    base_url = build_base_url(Path(args.root).resolve(), args.url)
+    response = HttpClient(timeout=args.timeout).post_json(
+        f"{base_url}/api/v1/knowledge-bases",
+        {"name": args.name, "description": args.description},
+    )
+    print_json(response)
+    return 0 if response.get("code", 0) == 0 else 1
+
+
+def cmd_upload(args: argparse.Namespace) -> int:
+    root = Path(args.root).resolve()
+    file_path = Path(args.file).resolve()
+    if not file_path.is_file():
+        print(f"文件不存在: {file_path}")
+        return 1
+    response = HttpClient(timeout=args.timeout).upload_file(
+        f"{build_base_url(root, args.url)}/api/v1/documents/upload",
+        file_path,
+        knowledge_base_id=args.knowledge_base_id,
+        tags=args.tags,
+        strategy=args.strategy,
+    )
+    print_json(response)
+    return 0 if response.get("code", 0) == 0 else 1
+
+
 def cmd_test(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
     python = resolve_python(root)
-    commands = [
-        [python, "test/test_cleaner.py", "--unit-only"],
-        [python, "test/test_strategies.py", "--unit-only"],
-        [python, "test/test_refactor_smoke.py"],
-        [python, "test/test_project_cli.py"],
-    ]
+    commands = [[python, "-m", "pytest", "-q", "test/test_private_rag.py"]]
     for command in commands:
         print(f"\n运行: {' '.join(command)}")
         result = subprocess.run(command, cwd=root)
@@ -625,10 +655,8 @@ def cmd_auto_score(args: argparse.Namespace) -> int:
         "--name",
         args.name,
     ]
-    if args.subject:
-        command.extend(["--subject", args.subject])
-    if args.grade:
-        command.extend(["--grade", args.grade])
+    if args.knowledge_base_id:
+        command.extend(["--knowledge-base-id", args.knowledge_base_id])
     if args.metrics:
         command.extend(["--metrics", args.metrics])
     if args.no_save:
@@ -654,7 +682,7 @@ def add_service_options(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="edu-rag",
-        description="Edu-RAG 本地项目管理 CLI",
+        description="Private-RAG 本地项目管理 CLI",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     add_common_options(parser)
@@ -706,23 +734,29 @@ def build_parser() -> argparse.ArgumentParser:
     list_docs.add_argument("--json", action="store_true", help="输出原始 JSON")
     list_docs.set_defaults(func=cmd_list_docs)
 
-    upload_samples = subparsers.add_parser("upload-samples", help="上传 sample_docs 下的样例文档")
-    add_service_options(upload_samples)
-    upload_samples.add_argument("--subject", default=None, help="覆盖所有样例的学科；不传则从文件名推断")
-    upload_samples.add_argument("--grade", default="", help="样例文档年级")
-    upload_samples.add_argument("--strategy", default="recursive", help="切片策略")
-    upload_samples.add_argument("--force", action="store_true", help="忽略已有样例清单，重新上传")
-    upload_samples.set_defaults(func=cmd_upload_samples)
+    list_kbs = subparsers.add_parser("list-kbs", help="查看知识库")
+    add_service_options(list_kbs)
+    list_kbs.add_argument("--json", action="store_true", help="输出原始 JSON")
+    list_kbs.set_defaults(func=cmd_list_kbs)
 
-    delete_samples = subparsers.add_parser("delete-samples", help="删除由 upload-samples 上传的样例文档")
-    add_service_options(delete_samples)
-    delete_samples.set_defaults(func=cmd_delete_samples)
+    create_kb = subparsers.add_parser("create-kb", help="创建知识库")
+    add_service_options(create_kb)
+    create_kb.add_argument("name", help="知识库名称")
+    create_kb.add_argument("--description", default="", help="知识库描述")
+    create_kb.set_defaults(func=cmd_create_kb)
+
+    upload = subparsers.add_parser("upload", help="上传文档到指定知识库")
+    add_service_options(upload)
+    upload.add_argument("file", help="PDF、Markdown 或 TXT 文件路径")
+    upload.add_argument("--knowledge-base-id", required=True, help="知识库 ID")
+    upload.add_argument("--tags", default="", help="逗号分隔标签")
+    upload.add_argument("--strategy", default="recursive", help="切片策略")
+    upload.set_defaults(func=cmd_upload)
 
     ask = subparsers.add_parser("ask", help="向 RAG 服务提问")
     add_service_options(ask)
     ask.add_argument("query", help="问题内容")
-    ask.add_argument("--subject", default=None, help="学科过滤")
-    ask.add_argument("--grade", default=None, help="年级过滤")
+    ask.add_argument("--knowledge-base-id", required=True, help="知识库 ID")
     ask.add_argument("--user-id", default="cli-demo", help="用户 ID")
     ask.add_argument("--session-id", default=None, help="会话 ID")
     ask.add_argument("--json", action="store_true", help="输出原始 JSON")
@@ -730,8 +764,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     auto_score = subparsers.add_parser("as", help="评估最近自动沉淀的问答测试集")
     auto_score.add_argument("--limit", type=int, default=50, help="读取最近多少条自动样本")
-    auto_score.add_argument("--subject", default=None, help="学科过滤")
-    auto_score.add_argument("--grade", default=None, help="年级过滤")
+    auto_score.add_argument("--knowledge-base-id", default=None, help="知识库 ID")
     auto_score.add_argument("--metrics", default=None, help="评估指标，逗号分隔")
     auto_score.add_argument("--name", default="auto_samples", help="评估任务名称")
     auto_score.add_argument("--no-save", action="store_true", help="不保存评估结果到数据库")

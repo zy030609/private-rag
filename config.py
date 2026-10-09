@@ -29,7 +29,7 @@ class Settings:
 
     # ---------- Milvus Lite 配置 ----------
     # 注意: 避免用 MILVUS_URI 命名（pymilvus 内部也读这个环境变量，会冲突）
-    MILVUS_URI: str = os.getenv("K12_MILVUS_URI", "./milvus_k12.db")
+    MILVUS_URI: str = os.getenv("PRIVATE_RAG_MILVUS_URI", "./private_rag_milvus.db")
     UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", os.path.join(BASE_DIR, "uploaded_docs"))
 
     # ---------- Embedding 配置 ----------
@@ -44,6 +44,14 @@ class Settings:
     APP_HOST: str = os.getenv("APP_HOST", "0.0.0.0")
     APP_PORT: int = int(os.getenv("APP_PORT", "8000"))
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+
+    # ---------- Redis 检索缓存 ----------
+    REDIS_ENABLED: bool = os.getenv("REDIS_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+    REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    REDIS_CACHE_TTL: int = max(1, int(os.getenv("REDIS_CACHE_TTL", "1800")))
+    REDIS_KEY_PREFIX: str = os.getenv("REDIS_KEY_PREFIX", "private-rag")
+    REDIS_CONNECT_TIMEOUT: float = float(os.getenv("REDIS_CONNECT_TIMEOUT", "1.0"))
+    REDIS_SOCKET_TIMEOUT: float = float(os.getenv("REDIS_SOCKET_TIMEOUT", "1.0"))
 
     # ---------- 检索参数 ----------
     TOP_K: int = 5                # 检索返回 Top-K 结果
@@ -85,10 +93,10 @@ class Settings:
     MAX_RETRIES: int = max(0, min(2, int(os.getenv("MAX_RETRIES", "2"))))  # Corrective RAG 最大重试次数
 
     # ---------- Milvus 集合名称 ----------
-    MILVUS_COLLECTION: str = "k12_knowledge_base"
+    MILVUS_COLLECTION: str = "private_documents"
 
     # ---------- SQLite 数据库路径 ----------
-    DATABASE_URL: str = os.getenv("DATABASE_URL", f"sqlite+aiosqlite:///{BASE_DIR}/k12_business.db")
+    DATABASE_URL: str = os.getenv("DATABASE_URL", f"sqlite+aiosqlite:///{BASE_DIR}/private_rag.db")
 
 
 settings = Settings()

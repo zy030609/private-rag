@@ -16,14 +16,23 @@ class Base(AsyncAttrs, DeclarativeBase):
 
 # ==================== 文档表 ====================
 
+class KnowledgeBase(Base):
+    """相互隔离的私有文档知识库。"""
+    __tablename__ = "knowledge_bases"
+
+    id = Column(String(64), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name = Column(String(128), nullable=False)
+    description = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
 class Document(Base):
     __tablename__ = "documents"
     id = Column(String(64), primary_key=True, default=lambda: str(uuid.uuid4()))
     title = Column(String(256), nullable=False)
     doc_type = Column(String(32), nullable=False)  # pdf, docx, md, txt
-    subject = Column(String(32), nullable=False, index=True)
-    grade = Column(String(32), default="", index=True)
-    chapter = Column(String(128), default="")
+    knowledge_base_id = Column(String(64), ForeignKey("knowledge_bases.id"), nullable=False, index=True)
+    tags = Column(JSON, default=list)
     file_path = Column(String(512), nullable=False)
     chunk_count = Column(Integer, default=0)
     status = Column(String(16), default="pending")  # pending, processing, completed, failed
@@ -59,6 +68,8 @@ class QARecord(Base):
     user_id = Column(String(64), nullable=False, index=True)
     query = Column(Text, nullable=False)
     answer = Column(Text, default="")
+    knowledge_base_id = Column(String(64), default="", index=True)
+    # 兼容历史评估数据；新问答链路不再写入教育领域字段。
     subject = Column(String(32), default="")
     grade = Column(String(32), default="")
     complexity = Column(String(16), default="medium")
@@ -79,6 +90,8 @@ class AutoEvalSample(Base):
     question = Column(Text, nullable=False)
     answer = Column(Text, nullable=False)
     contexts = Column(JSON, default=list)
+    knowledge_base_id = Column(String(64), default="", index=True)
+    # 兼容旧测试集和评估 CLI，后续数据统一按 knowledge_base_id 筛选。
     subject = Column(String(32), default="", index=True)
     grade = Column(String(32), default="", index=True)
     complexity = Column(String(16), default="medium")

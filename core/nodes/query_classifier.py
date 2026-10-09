@@ -80,7 +80,7 @@ class ComplexityResult(BaseModel):
     reason: str = Field(description="分类理由，一句话")
 
 
-COMPLEXITY_PROMPT = """分析以下教育类查询的复杂度，分为三级：
+COMPLEXITY_PROMPT = """分析以下知识库查询的复杂度，分为三级：
 
 - simple: 简单事实检索，答案直接、唯一（如定义、公式、日期、人名、地点）
 - medium: 需要解释概念、举例说明、描述过程或简要概括

@@ -15,18 +15,26 @@ def get_rag_service(request: Request):
     return service
 
 
+async def ensure_knowledge_base(request: Request, knowledge_base_id: str) -> None:
+    service = getattr(request.app.state, "knowledge_base_service", None)
+    if service is None:
+        raise HTTPException(status_code=503, detail="知识库服务未初始化")
+    if not await service.exists(knowledge_base_id):
+        raise HTTPException(status_code=404, detail="知识库不存在")
+
+
 @router.post("/ask", response_model=AskResponse)
 async def ask_question(req: AskRequest, request: Request):
     """RAG 问答接口：根据用户问题检索知识库并生成回答"""
     rag_service = get_rag_service(request)
+    await ensure_knowledge_base(request, req.knowledge_base_id)
 
-    logger.info(f"收到问答请求: query='{req.query[:50]}', subject={req.subject}, grade={req.grade}")
+    logger.info(f"收到问答请求: query='{req.query[:50]}', knowledge_base_id={req.knowledge_base_id}")
 
     try:
         result = await rag_service.ask(
             query=req.query,
-            subject=req.subject,
-            grade=req.grade,
+            knowledge_base_id=req.knowledge_base_id,
             user_id=req.user_id,
             session_id=req.session_id,
             stream=req.stream,
@@ -37,6 +45,7 @@ async def ask_question(req: AskRequest, request: Request):
             "references": result["references"],
             "latency_ms": result["latency_ms"],
             "complexity": result.get("complexity", "medium"),
+            "cache_hit": result.get("cache_hit", False),
             "record_id": result.get("record_id"),
             "session_id": result["session_id"],
         })
@@ -50,15 +59,15 @@ async def ask_question(req: AskRequest, request: Request):
 async def ask_question_stream(req: AskRequest, request: Request):
     """流式 RAG 问答接口（SSE），逐 token 返回回答"""
     rag_service = get_rag_service(request)
+    await ensure_knowledge_base(request, req.knowledge_base_id)
 
-    logger.info(f"收到流式问答请求: query='{req.query[:50]}', subject={req.subject}, grade={req.grade}")
+    logger.info(f"收到流式问答请求: query='{req.query[:50]}', knowledge_base_id={req.knowledge_base_id}")
 
     session_id = rag_service.resolve_session_id(req.session_id, req.user_id)
     return StreamingResponse(
         rag_service.ask_stream(
             query=req.query,
-            subject=req.subject,
-            grade=req.grade,
+            knowledge_base_id=req.knowledge_base_id,
             user_id=req.user_id,
             session_id=session_id,
         ),

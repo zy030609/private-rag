@@ -35,20 +35,20 @@ def get_vector_store(request: Request):
 @router.post("/from-history", response_model=AskResponse)
 async def evaluate_from_history(
     limit: int = Query(50, description="取最近多少条 QA 记录进行评估"),
-    subject: str | None = Query(None, description="按学科过滤"),
+    knowledge_base_id: str | None = Query(None, description="按知识库过滤"),
     metrics: str | None = Query(None, description="评估指标，逗号分隔 (faithfulness,answer_relevancy,context_precision)"),
 ):
     """基于历史问答记录运行 RAGAS 评估"""
-    logger.info("API 触发评估: from_history, limit=%d, subject=%s", limit, subject)
+    logger.info("API 触发评估: from_history, limit=%d, knowledge_base_id=%s", limit, knowledge_base_id)
 
     metric_list = _parse_metrics(metrics)
-    dataset = await EvalDatasetBuilder.from_db(limit=limit, subject=subject)
+    dataset = await EvalDatasetBuilder.from_db(limit=limit, knowledge_base_id=knowledge_base_id)
     if len(dataset) == 0:
         return AskResponse(code=1, message="没有找到可评估的问答记录", data=None)
 
     result = await run_evaluation(
         dataset=dataset,
-        name=f"from_history_{subject or 'all'}",
+        name=f"from_history_{knowledge_base_id or 'all'}",
         metrics=metric_list,
     )
     return AskResponse(data=eval_result_to_dict(result))
@@ -60,25 +60,22 @@ async def evaluate_from_history(
 @router.post("/from-auto", response_model=AskResponse)
 async def evaluate_from_auto(
     limit: Annotated[int, Query(ge=1, le=500, description="取最近多少条自动问答样本进行评估")] = 50,
-    subject: Annotated[str | None, Query(description="按学科过滤")] = None,
-    grade: Annotated[str | None, Query(description="按年级过滤")] = None,
+    knowledge_base_id: Annotated[str | None, Query(description="按知识库过滤")] = None,
     metrics: Annotated[str | None, Query(description="评估指标，逗号分隔")] = None,
     name: Annotated[str, Query(description="评估任务名称")] = "auto_samples",
     save: Annotated[bool, Query(description="是否保存评估结果")] = True,
 ):
     """基于自动沉淀的成功 RAG 问答样本运行 RAGAS 评估。"""
     logger.info(
-        "API 触发评估: from_auto, limit=%d, subject=%s, grade=%s, name=%s",
+        "API 触发评估: from_auto, limit=%d, knowledge_base_id=%s, name=%s",
         limit,
-        subject,
-        grade,
+        knowledge_base_id,
         name,
     )
 
     dataset = await EvalDatasetBuilder.from_auto_samples(
         limit=limit,
-        subject=subject,
-        grade=grade,
+        knowledge_base_id=knowledge_base_id,
     )
     if len(dataset) == 0:
         return AskResponse(code=1, message="自动问答测试集为空，请先完成至少一次门控通过的 RAG 问答", data=None)
@@ -120,8 +117,7 @@ async def evaluate_from_content(
     file: UploadFile | None = File(None, description="上传 JSON/JSONL 测试集文件"),
     content: str | None = Form(None, description="直接粘贴的 JSON/JSONL 内容"),
     metrics: str | None = Form(None, description="评估指标，逗号分隔"),
-    subject: str | None = Form(None),
-    grade: str | None = Form(None),
+    knowledge_base_id: str = Form(...),
 ):
     """上传测试集文件或粘贴内容，运行实时评估（先 RAG 回答再 RAGAS 打分）"""
     vector_store = get_vector_store(request)
@@ -147,8 +143,7 @@ async def evaluate_from_content(
     result = await run_live_evaluation(
         questions=questions,
         vector_store=vector_store,
-        subject=subject or None,
-        grade=grade or None,
+        knowledge_base_id=knowledge_base_id,
         metrics=metric_list,
         name="frontend_upload",
         ground_truths=ground_truths if any(ground_truths) else None,
@@ -182,8 +177,7 @@ async def evaluate_from_file(
 async def evaluate_live(
     request: Request,
     questions: list[str] = Query(..., description="待评估的问题列表"),
-    subject: str | None = Query(None),
-    grade: str | None = Query(None),
+    knowledge_base_id: str = Query(...),
     metrics: str | None = Query(None),
 ):
     """实时问答 + 评估：先让 RAG 系统回答问题，再用 RAGAS 评估"""
@@ -192,8 +186,7 @@ async def evaluate_live(
     result = await run_live_evaluation(
         questions=questions,
         vector_store=vector_store,
-        subject=subject,
-        grade=grade,
+        knowledge_base_id=knowledge_base_id,
         metrics=metric_list,
         name="live_eval",
     )

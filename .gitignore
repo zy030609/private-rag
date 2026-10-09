@@ -55,3 +55,9 @@ htmlcov/
 # 配置文件（本地特定配置）
 config.local.py
 secrets.py
+
+# Docker local data
+docker/volumes/
+
+# User-uploaded private documents
+uploaded_docs/

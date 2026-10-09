@@ -9,8 +9,7 @@ from typing import Any
 class AskRequest(BaseModel):
     """问答请求"""
     query: str = Field(..., description="用户问题", min_length=1, max_length=2000)
-    subject: str | None = Field(None, description="学科过滤（如：数学）")
-    grade: str | None = Field(None, description="年级过滤（如：七年级）")
+    knowledge_base_id: str = Field(..., description="知识库 ID")
     user_id: str | None = Field(None, description="用户 ID")
     session_id: str | None = Field(None, description="会话 ID")
     stream: bool = Field(False, description="是否流式输出")
@@ -19,11 +18,13 @@ class AskRequest(BaseModel):
 class Reference(BaseModel):
     """引用来源"""
     chunk_id: int | None = None
+    document_id: str = ""
     text: str = ""
     source: str = ""
     score: float = 0.0
-    subject: str = ""
-    grade: str = ""
+    knowledge_base_id: str = ""
+    source_file: str = ""
+    page: int = 0
 
 
 class AskResponse(BaseModel):
@@ -49,29 +50,18 @@ class DocumentListResponse(BaseModel):
     total: int = 0
 
 
-# ==================== 知识点接口 ====================
+# ==================== 知识库管理接口 ====================
 
-class KnowledgePointCreate(BaseModel):
-    """知识点创建请求"""
-    name: str = Field(..., description="知识点名称")
-    subject: str = Field(..., description="所属学科")
-    parent_id: str | None = Field(None, description="父知识点 ID")
-    description: str = ""
-    sort_order: int = 0
+class KnowledgeBaseCreate(BaseModel):
+    """创建知识库请求。"""
+    name: str = Field(..., min_length=1, max_length=128, description="知识库名称")
+    description: str = Field("", max_length=1000, description="知识库描述")
 
 
-class KnowledgePointResponse(BaseModel):
-    """知识点响应"""
+class KnowledgeBaseResponse(BaseModel):
     code: int = 0
-    data: list[dict] | dict | None = None
-
-
-# ==================== 学情分析接口 ====================
-
-class AnalyticsResponse(BaseModel):
-    """学情分析响应"""
-    code: int = 0
-    data: dict | None = None
+    message: str = "success"
+    data: dict | list[dict] | None = None
 
 
 # ==================== SQL 数据导入 ====================
@@ -80,9 +70,8 @@ class SQLImportRequest(BaseModel):
     """SQL 数据导入请求：提供数据库连接信息，由后端连接数据库流式读取"""
     db_url: str = Field(..., description="数据库连接串，如 mysql+pymysql://user:pass@host:3306/db")
     table_name: str = Field(..., description="源表名")
-    subject: str = Field(..., description="学科")
-    grade: str = Field("", description="年级")
-    chapter: str = Field("", description="章节")
+    knowledge_base_id: str = Field(..., description="目标知识库 ID")
+    tags: list[str] = Field(default_factory=list, description="文档标签")
     field_map: dict[str, str] | None = Field(None, description="字段中文映射，如 {'name': '商品', 'price': '价格'}")
     id_column: str = Field("id", description="主键列名，用于游标分页")
     columns: list[str] | None = Field(None, description="需要查询的列，不传默认 SELECT *")

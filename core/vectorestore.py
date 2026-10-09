@@ -4,11 +4,12 @@ from rank_bm25 import BM25Okapi
 from core.embeddings import get_embedding_model, get_embedding_dim, embed_texts, embed_query
 from utils.logger import logger
 from config import settings
+from core.scope import belongs_to_knowledge_base, require_knowledge_base_id
 
 
-class K12VectorStore:
+class PrivateDocumentVectorStore:
     """
-    K12 混合向量存储：
+    通用知识库混合向量存储：
     - 稠密检索：Milvus Lite（ANN 搜索）
     - 稀疏检索：本地 BM25（关键词搜索）
     - 融合策略：RRF（倒数排名融合）
@@ -28,7 +29,7 @@ class K12VectorStore:
         self.bm25_docs: list[dict] = []  # 与 BM25 对应的文档列表
         self.bm25_corpus: list[list[str]] = []  # 分词后的语料库
 
-        logger.info("K12VectorStore 初始化完成")
+        logger.info("PrivateDocumentVectorStore 初始化完成")
 
     # ==================== Milvus 集合管理 ====================
 
@@ -36,8 +37,10 @@ class K12VectorStore:
         collection_name = settings.MILVUS_COLLECTION
         if self.milvus_client.has_collection(collection_name):
             logger.info(f"集合 '{collection_name}' 已存在，直接加载")
-            self.milvus_client.load_collection(collection_name)
             self._ensure_index()
+            # Milvus Standalone requires an explicit load after the index exists.
+            # Milvus Lite often loads automatically, which used to hide this bug.
+            self.milvus_client.load_collection(collection_name)
             return
         logger.info(f"正在创建集合: {collection_name}")
         schema = MilvusClient.create_schema(
@@ -48,14 +51,13 @@ class K12VectorStore:
         schema.add_field("vector", DataType.FLOAT_VECTOR, dim=self.embedding_dim)
         schema.add_field("doc_id", DataType.VARCHAR, max_length=64)
         schema.add_field("chunk_text", DataType.VARCHAR, max_length=8192)
-        schema.add_field("subject", DataType.VARCHAR, max_length=32)
-        schema.add_field("grade", DataType.VARCHAR, max_length=32)
-        schema.add_field("chapter", DataType.VARCHAR, max_length=128)
-        schema.add_field("knowledge_point", DataType.VARCHAR, max_length=128)
+        schema.add_field("knowledge_base_id", DataType.VARCHAR, max_length=64)
         schema.add_field("chunk_type", DataType.VARCHAR, max_length=32)
         self.milvus_client.create_collection(collection_name, schema=schema)
         # 创建索引（与 create_collection 分开调用，确保生效）
         self._ensure_index()
+        # Milvus Standalone does not automatically load a newly created collection.
+        self.milvus_client.load_collection(collection_name)
         logger.info(f"集合 '{collection_name}' 创建成功")
 
     def _ensure_index(self):
@@ -84,7 +86,7 @@ class K12VectorStore:
         """
         将切片列表插入向量存储。
 
-        chunks: 每个元素包含 text, doc_id, subject, grade, chapter, knowledge_point, chunk_type
+        chunks: 每个元素包含 text、doc_id、knowledge_base_id、tags 等字段
         返回插入的 Milvus ID 列表。
         """
         if not chunks:
@@ -103,10 +105,8 @@ class K12VectorStore:
                 "vector": vec,
                 "doc_id": chunk.get("doc_id", ""),
                 "chunk_text": chunk["text"],
-                "subject": chunk.get("subject", ""),
-                "grade": chunk.get("grade", ""),
-                "chapter": chunk.get("chapter", ""),
-                "knowledge_point": chunk.get("knowledge_point", ""),
+                "knowledge_base_id": chunk.get("knowledge_base_id", ""),
+                "tags": chunk.get("tags", []),
                 "chunk_type": chunk.get("chunk_type", "text"),
                 "page": chunk.get("page", 0),
                 "source_file": chunk.get("source_file", ""),
@@ -131,7 +131,7 @@ class K12VectorStore:
             result = self.milvus_client.query(
                 collection_name=collection_name,
                 filter="",
-                output_fields=["id", "chunk_text", "doc_id", "subject", "grade", "chapter", "knowledge_point", "source_file", "file_type", "page"],
+                output_fields=["id", "chunk_text", "doc_id", "knowledge_base_id", "tags", "source_file", "file_type", "page"],
                 limit=10000,
             )
         except Exception as e:
@@ -172,22 +172,22 @@ class K12VectorStore:
     def hybrid_search(
             self,
             query: str,
-            subject: str | None = None,
-            grade: str | None = None,
+            knowledge_base_id: str | None = None,
             top_k: int = 5,
+            **legacy_filters,
     ) -> list[dict]:
         """
         混合检索：稠密向量 + 稀疏 BM25，RRF 融合。
 
         返回按相关性降序排列的文档列表，每项包含 score 和元数据。
         """
-        logger.info(f"混合检索: query='{query[:50]}', subject={subject}, grade={grade}, top_k={top_k}")
-        filters = []
-        if subject:
-            filters.append(f"subject == '{subject}'")
-        if grade:
-            filters.append(f"grade == '{grade}'")
-        filter_str = " and ".join(filters) if filters else ""
+        # legacy_filters 仅用于兼容旧调用链；新 API 只暴露 knowledge_base_id。
+        knowledge_base_id = require_knowledge_base_id(
+            knowledge_base_id or legacy_filters.get("subject")
+        )
+        logger.info(f"混合检索: query='{query[:50]}', knowledge_base_id={knowledge_base_id}, top_k={top_k}")
+        safe_kb_id = knowledge_base_id.replace("'", "\\'")
+        filter_str = f"knowledge_base_id == '{safe_kb_id}'"
         logger.info(f"混合检索 filter_str=={filter_str}")
 
         # 1. 稠密检索（Milvus ANN）
@@ -195,7 +195,7 @@ class K12VectorStore:
         logger.debug(f"稠密检索返回 {len(dense_results)} 条结果")
 
         # 2. 稀疏检索（本地 BM25）
-        sparse_results = self._sparse_search(query, filter_str, top_k)
+        sparse_results = self._sparse_search(query, knowledge_base_id, top_k)
         logger.debug(f"稀疏检索返回 {len(sparse_results)} 条结果")
 
         # 3. RRF 融合
@@ -220,7 +220,7 @@ class K12VectorStore:
             data=[query_vec],
             filter=filter_str or None,
             limit=top_k,
-            output_fields=["chunk_text", "doc_id", "subject", "grade", "chapter", "knowledge_point", "source_file", "file_type", "page"],
+            output_fields=["chunk_text", "doc_id", "knowledge_base_id", "tags", "source_file", "file_type", "page"],
             search_params={"metric_type": "COSINE", "params": {"ef": 10}},
         )
         if not results or not results[0]:
@@ -236,10 +236,8 @@ class K12VectorStore:
                 "dense_raw_score": sim,
                 "fusion_score": sim,
                 "doc_id": hit["entity"].get("doc_id", ""),
-                "subject": hit["entity"].get("subject", ""),
-                "grade": hit["entity"].get("grade", ""),
-                "chapter": hit["entity"].get("chapter", ""),
-                "knowledge_point": hit["entity"].get("knowledge_point", ""),
+                "knowledge_base_id": hit["entity"].get("knowledge_base_id", ""),
+                "tags": hit["entity"].get("tags", []),
                 "source_file": hit["entity"].get("source_file", ""),
                 "file_type": hit["entity"].get("file_type", ""),
                 "page": hit["entity"].get("page", 0),
@@ -254,7 +252,7 @@ class K12VectorStore:
             )
         return docs
 
-    def _sparse_search(self, query: str, filter_str: str, top_k: int) -> list[dict]:
+    def _sparse_search(self, query: str, knowledge_base_id: str, top_k: int) -> list[dict]:
         """本地 BM25 稀疏检索"""
         if not self.bm25 or not self.bm25_docs:
             logger.debug("BM25 索引为空，跳过稀疏检索")
@@ -270,12 +268,9 @@ class K12VectorStore:
             if scores[idx] <= 0:
                 continue
             doc = self.bm25_docs[idx]
-            # 如果有过滤条件，简易过滤
-            if filter_str:
-                if "subject" in filter_str and doc.get("subject", "") not in filter_str:
-                    continue
-                if "grade" in filter_str and doc.get("grade", "") not in filter_str:
-                    continue
+            # BM25 是进程内全量索引，必须显式做知识库隔离。
+            if not belongs_to_knowledge_base(doc, knowledge_base_id):
+                continue
             results.append({
                 "id": doc.get("id", 0),
                 "text": doc.get("chunk_text", ""),
@@ -283,10 +278,8 @@ class K12VectorStore:
                 "sparse_raw_score": float(scores[idx]),
                 "fusion_score": float(scores[idx]),
                 "doc_id": doc.get("doc_id", ""),
-                "subject": doc.get("subject", ""),
-                "grade": doc.get("grade", ""),
-                "chapter": doc.get("chapter", ""),
-                "knowledge_point": doc.get("knowledge_point", ""),
+                "knowledge_base_id": doc.get("knowledge_base_id", ""),
+                "tags": doc.get("tags", []),
                 "source_file": doc.get("source_file", ""),
                 "file_type": doc.get("file_type", ""),
                 "page": doc.get("page", 0),
@@ -349,3 +342,7 @@ class K12VectorStore:
         collection_name = settings.MILVUS_COLLECTION
         stats = self.milvus_client.get_collection_stats(collection_name)
         return {"row_count": stats.get("row_count", 0)}
+
+
+# 兼容上游项目的旧导入路径；新代码统一使用 PrivateDocumentVectorStore。
+K12VectorStore = PrivateDocumentVectorStore

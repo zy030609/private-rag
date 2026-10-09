@@ -6,17 +6,24 @@ import re
 
 from config import settings
 from ingestion.pipeline import IngestionPipeline
-from core.vectorestore import K12VectorStore
-from models.db_models import Document, get_session_maker
+from core.vectorestore import PrivateDocumentVectorStore
+from core.redis_cache import RedisRetrievalCache
+from models.db_models import Document, KnowledgeBase, get_session_maker
 from utils.logger import logger
 
 
 class DocumentService:
     """文档管理服务"""
-    def __init__(self, vector_store: K12VectorStore, upload_dir: str | None = None):
+    def __init__(
+        self,
+        vector_store: PrivateDocumentVectorStore,
+        upload_dir: str | None = None,
+        retrieval_cache: RedisRetrievalCache | None = None,
+    ):
         self.vector_store = vector_store
         self.pipeline = IngestionPipeline(vector_store)
         self.upload_dir = upload_dir or settings.UPLOAD_DIR
+        self.retrieval_cache = retrieval_cache
         os.makedirs(self.upload_dir, exist_ok=True)
 
     def _save_uploaded_file(self, doc_id: str, filename: str, file_content: bytes) -> str:
@@ -31,9 +38,8 @@ class DocumentService:
         doc_id: str,
         title: str,
         doc_type: str,
-        subject: str,
-        grade: str,
-        chapter: str,
+        knowledge_base_id: str,
+        tags: list[str],
         file_path: str,
     ) -> None:
         session_maker = get_session_maker()
@@ -42,9 +48,8 @@ class DocumentService:
                 id=doc_id,
                 title=title,
                 doc_type=doc_type,
-                subject=subject,
-                grade=grade,
-                chapter=chapter,
+                knowledge_base_id=knowledge_base_id,
+                tags=tags,
                 file_path=file_path,
                 status="processing",
             )
@@ -89,9 +94,8 @@ class DocumentService:
             self,
             file_content: bytes,
             filename: str,
-            subject: str,
-            grade: str = "",
-            chapter: str = "",
+            knowledge_base_id: str,
+            tags: list[str] | None = None,
             strategy: str = "recursive",
     ) -> dict:
         """
@@ -99,7 +103,9 @@ class DocumentService:
 
         流程：保存文件 → 创建文档记录 → 执行 IngestPipeline → 更新状态
         """
-        logger.info(f"上传文档: {filename}, subject={subject}, grade={grade}")
+        tags = tags or []
+        await self._require_knowledge_base(knowledge_base_id)
+        logger.info(f"上传文档: {filename}, knowledge_base_id={knowledge_base_id}")
 
         # 1. 保存文件
         doc_id = str(uuid.uuid4())
@@ -109,22 +115,24 @@ class DocumentService:
             doc_id=doc_id,
             title=filename,
             doc_type=os.path.splitext(filename)[1].lstrip("."),
-            subject=subject,
-            grade=grade,
-            chapter=chapter,
+            knowledge_base_id=knowledge_base_id,
+            tags=tags,
             file_path=file_path,
         )
 
         # 3. 执行 IngestPipeline
         result = self.pipeline.process_file(
             file_path=file_path,
-            subject=subject,
-            grade=grade,
-            chapter=chapter,
+            knowledge_base_id=knowledge_base_id,
+            document_id=doc_id,
+            tags=tags,
             strategy=strategy,
         )
         # 4. 更新文档状态
         await self._update_document_record_status(doc_id, result)
+
+        if result.get("status") == "success" and self.retrieval_cache is not None:
+            await self.retrieval_cache.bump_knowledge_base_version(knowledge_base_id)
 
         result["doc_id"] = doc_id
         return result
@@ -133,9 +141,8 @@ class DocumentService:
             self,
             db_url: str,
             table_name: str,
-            subject: str = "",
-            grade: str = "",
-            chapter: str = "",
+            knowledge_base_id: str,
+            tags: list[str] | None = None,
             field_map: dict[str, str] | None = None,
             id_column: str = "id",
             columns: list[str] | None = None,
@@ -149,9 +156,8 @@ class DocumentService:
         参数:
             db_url: 数据库连接串，如 mysql+pymysql://user:pass@host:3306/db
             table_name: 源表名
-            subject: 学科
-            grade: 年级
-            chapter: 章节
+            knowledge_base_id: 目标知识库 ID
+            tags: 文档标签
             field_map: 字段中文映射 {字段名: 中文标签}
             id_column: 主键列名，用于游标分页
             columns: 需要查询的列
@@ -161,7 +167,9 @@ class DocumentService:
         """
         from ingestion.cleaner import SQLSourceAdapter
 
-        logger.info(f"SQL 导入: db={db_url}, table={table_name}, subject={subject}")
+        tags = tags or []
+        await self._require_knowledge_base(knowledge_base_id)
+        logger.info(f"SQL 导入: db={db_url}, table={table_name}, knowledge_base_id={knowledge_base_id}")
         self._validate_sql_import_identifiers(table_name, id_column, columns)
 
         # 1. 创建文档记录
@@ -170,9 +178,8 @@ class DocumentService:
             doc_id=doc_id,
             title=f"[SQL] {table_name}",
             doc_type="mysql",
-            subject=subject,
-            grade=grade,
-            chapter=chapter,
+            knowledge_base_id=knowledge_base_id,
+            tags=tags,
             file_path=f"mysql://{table_name}",
         )
 
@@ -188,35 +195,44 @@ class DocumentService:
         )
         result = self.pipeline.process_sql(
             adapter=adapter,
-            subject=subject,
-            grade=grade,
-            chapter=chapter,
+            knowledge_base_id=knowledge_base_id,
+            document_id=doc_id,
+            tags=tags,
             strategy=strategy,
         )
 
         # 3. 更新文档状态
         await self._update_document_record_status(doc_id, result)
 
+        if result.get("status") == "success" and self.retrieval_cache is not None:
+            await self.retrieval_cache.bump_knowledge_base_version(knowledge_base_id)
+
         result["doc_id"] = doc_id
         return result
 
-    async def list_documents(self) -> list[dict]:
+    async def _require_knowledge_base(self, knowledge_base_id: str) -> None:
+        session_maker = get_session_maker()
+        async with session_maker() as session:
+            if await session.get(KnowledgeBase, knowledge_base_id) is None:
+                raise ValueError("知识库不存在")
+
+    async def list_documents(self, knowledge_base_id: str | None = None) -> list[dict]:
         """获取文档列表"""
         session_maker = get_session_maker()
         async with session_maker() as session:
             from sqlalchemy import select
-            result = await session.execute(
-                select(Document).order_by(Document.created_at.desc())
-            )
+            query = select(Document)
+            if knowledge_base_id:
+                query = query.where(Document.knowledge_base_id == knowledge_base_id)
+            result = await session.execute(query.order_by(Document.created_at.desc()))
             docs = result.scalars().all()
             return [
                 {
                     "id": d.id,
                     "title": d.title,
                     "doc_type": d.doc_type,
-                    "subject": d.subject,
-                    "grade": d.grade,
-                    "chapter": d.chapter,
+                    "knowledge_base_id": d.knowledge_base_id,
+                    "tags": d.tags or [],
                     "chunk_count": d.chunk_count,
                     "status": d.status,
                     "error_message": d.error_message,
@@ -235,6 +251,8 @@ class DocumentService:
                 logger.warning(f"文档不存在: {doc_id}")
                 return False
 
+            knowledge_base_id = doc.knowledge_base_id
+
             # 删除本地文件
             self._delete_file_if_exists(doc.file_path)
 
@@ -244,5 +262,7 @@ class DocumentService:
             # 删除数据库记录
             await session.delete(doc)
             await session.commit()
+            if self.retrieval_cache is not None:
+                await self.retrieval_cache.bump_knowledge_base_version(knowledge_base_id)
             logger.info(f"文档已删除: {doc_id}")
             return True

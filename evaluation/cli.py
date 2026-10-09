@@ -50,8 +50,7 @@ def _add_evaluate_parser(subparsers) -> None:
     p.add_argument("--from-file", type=str, help="从 JSON/JSONL 文件加载数据集")
     p.add_argument("--live", action="store_true", help="实时模式：先通过 RAG 系统生成回答，再评估（适用于只有 question 的测试集）")
     p.add_argument("--limit", type=int, default=50, help="从 DB 提取的最大记录数")
-    p.add_argument("--subject", type=str, default=None, help="学科过滤")
-    p.add_argument("--grade", type=str, default=None, help="年级过滤（live 模式）")
+    p.add_argument("--knowledge-base-id", type=str, default=None, help="知识库 ID（实时评估必填）")
     p.add_argument("--metrics", type=str, default=None, help="评估指标，逗号分隔")
     p.add_argument("--name", type=str, default="cli_eval", help="评估任务名称")
     p.add_argument("--save", action="store_true", help="保存评估结果到数据库")
@@ -61,8 +60,7 @@ def _add_evaluate_parser(subparsers) -> None:
 def _add_evaluate_auto_parser(subparsers) -> None:
     p = subparsers.add_parser("evaluate-auto", help="从自动沉淀问答样本运行 RAGAS 评估")
     p.add_argument("--limit", type=int, default=50, help="读取最近多少条自动样本")
-    p.add_argument("--subject", type=str, default=None, help="学科过滤")
-    p.add_argument("--grade", type=str, default=None, help="年级过滤")
+    p.add_argument("--knowledge-base-id", type=str, default=None, help="按知识库过滤")
     p.add_argument("--metrics", type=str, default=None, help="评估指标，逗号分隔")
     p.add_argument("--name", type=str, default="auto_samples", help="评估任务名称")
     p.add_argument("--no-save", action="store_true", help="不保存评估结果到数据库")
@@ -76,7 +74,7 @@ async def _cmd_evaluate(args: argparse.Namespace) -> None:
     dataset: Dataset | None = None
     if args.from_db:
         print("从 QA 历史记录构建数据集...")
-        dataset = await EvalDatasetBuilder.from_db(limit=args.limit, subject=args.subject)
+        dataset = await EvalDatasetBuilder.from_db(limit=args.limit, knowledge_base_id=args.knowledge_base_id)
     elif args.from_file and args.live:
         print(f"实时评估模式: {args.from_file}")
         app_state = build_app_state()
@@ -87,8 +85,7 @@ async def _cmd_evaluate(args: argparse.Namespace) -> None:
         result = await run_live_evaluation(
             questions=questions,
             vector_store=app_state.vector_store,
-            subject=args.subject,
-            grade=args.grade,
+            knowledge_base_id=args.knowledge_base_id,
             metrics=metrics,
             name=args.name,
             ground_truths=ground_truths if any(ground_truths) else None,
@@ -130,12 +127,11 @@ async def _cmd_evaluate_auto(args: argparse.Namespace) -> None:
     await init_db()
     print(
         f"从自动问答测试集构建数据集: limit={args.limit}, "
-        f"subject={args.subject}, grade={args.grade}"
+        f"knowledge_base_id={args.knowledge_base_id}"
     )
     dataset = await EvalDatasetBuilder.from_auto_samples(
         limit=args.limit,
-        subject=args.subject,
-        grade=args.grade,
+        knowledge_base_id=args.knowledge_base_id,
     )
     if len(dataset) == 0:
         print("自动问答测试集为空，请先完成至少一次门控通过的 RAG 问答")

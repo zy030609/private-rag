@@ -70,9 +70,9 @@ def _enforce_max_chunk_size(chunks: list[Document]) -> list[Document]:
 
 def split_documents(
         docs: list[Document],
-        subject: str = "",
-        grade: str = "",
-        chapter: str = "",
+        knowledge_base_id: str = "",
+        document_id: str | None = None,
+        tags: list[str] | None = None,
         strategy: str = "recursive",
 ) -> list[dict]:
     """
@@ -80,13 +80,13 @@ def split_documents(
 
     参数:
         docs: 原始文档列表
-        subject: 学科（如 数学）
-        grade: 年级（如 七年级）
-        chapter: 章节名称
+        knowledge_base_id: 知识库 ID
+        document_id: 业务文档 ID
+        tags: 文档标签
         strategy: 切分策略（recursive / semantic / markdown）
 
     返回:
-        切片字典列表，每项包含 text, doc_id, subject, grade, chapter 等字段
+        切片字典列表，每项包含文本、文档 ID、知识库 ID 和来源信息
     """
     logger.info(f"开始切片: strategy={strategy}, docs={len(docs)}个")
     if strategy == "markdown":
@@ -96,16 +96,14 @@ def split_documents(
     else:
         chunks = _split_recursive(docs)
     # 统一封装为字典格式
-    doc_id = str(uuid.uuid4())
+    doc_id = document_id or str(uuid.uuid4())
     result = []
     for i, chunk in enumerate(chunks):
         result.append({
             "text": chunk.page_content,
             "doc_id": doc_id,
-            "subject": subject,
-            "grade": grade,
-            "chapter": chapter,
-            "knowledge_point": chunk.metadata.get("knowledge_point", ""),
+            "knowledge_base_id": knowledge_base_id,
+            "tags": tags or [],
             "chunk_type": chunk.metadata.get("chunk_type", "text"),
             "chunk_index": i,
             "page": chunk.metadata.get("page", 0),
@@ -149,7 +147,7 @@ def _split_recursive(docs: list[Document]) -> list[Document]:
 
 
 def _split_semantic(docs: list[Document]) -> list[Document]:
-    """语义切分：适合教材正文、概念讲解
+    """语义切分：适合长篇文档和概念说明
 
     会二次拆分超大 chunk，防止两个典型问题：
     1. 长段落黑洞 — 语义连贯的长段落找不到断点，整段变成一个 chunk

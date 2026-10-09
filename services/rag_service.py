@@ -7,43 +7,21 @@ import uuid
 from typing import AsyncGenerator, Any
 
 from config import settings
-from core.state import RAGState
+from core.state import RAGState, build_initial_state
 from core.stream_queue import stream_queues
-from core.vectorestore import K12VectorStore
+from core.vectorestore import PrivateDocumentVectorStore
 from models.db_models import AutoEvalSample, QARecord, get_session_maker
 from utils.logger import logger
+from utils.references import format_references
 
 
-def format_references(docs: list[dict]) -> list[dict]:
-    """将检索结果格式化为前端兼容的引用结构。"""
-    references = []
-    for doc in docs:
-        reference = {
-            "index": len(references) + 1,
-            "chunk_id": doc.get("id"),
-            "text": doc.get("text", "")[:200],
-            "source_file": doc.get("source_file") or doc.get("doc_id") or "未知来源",
-            "page": doc.get("page", 0),
-            "chapter": doc.get("chapter", ""),
-            "score": round(
-                doc.get("rerank_score", doc.get("fusion_score", doc.get("score", 0))),
-                4,
-            ),
-            "subject": doc.get("subject", ""),
-            "grade": doc.get("grade", ""),
-        }
-        reference["source"] = doc.get("doc_id", "")
-        references.append(reference)
-    return references
-
-
-ABSTAIN_PREFIX = "抱歉，我暂时没有检索到足够可靠的资料"
+ABSTAIN_PREFIX = "当前知识库中没有检索到足够可靠的依据"
 
 
 class RAGService:
     """RAG 问答服务，所有问答流程均通过 LangGraph 工作流编排"""
 
-    def __init__(self, vector_store: K12VectorStore, rag_graph: Any):
+    def __init__(self, vector_store: PrivateDocumentVectorStore, rag_graph: Any):
         self.vector_store = vector_store
         self.rag_graph = rag_graph
 
@@ -55,35 +33,15 @@ class RAGService:
     def _build_initial_state(
         self,
         query: str,
-        subject: str | None,
-        grade: str | None,
+        knowledge_base_id: str,
         session_id: str,
     ) -> dict:
-        return {
-            "query": query,
-            "subject": subject,
-            "grade": grade,
-            "session_id": session_id,
-            "intent": "",
-            "complexity": "",
-            "retrieved_docs": [],
-            "answer": "",
-            "retry_count": 0,
-            "max_retries": settings.MAX_RETRIES,
-            "retrieval_plan": {"strategy": "initial", "queries": [query]},
-            "retrieval_attempts": [],
-            "retrieval_metrics": {},
-            "retrieval_decision": {},
-            "abstain_reason": "",
-            "sub_queries": [],
-            "_queue_id": "",
-        }
+        return build_initial_state(query, knowledge_base_id, session_id, settings.MAX_RETRIES)
 
     async def ask(
         self,
         query: str,
-        subject: str | None = None,
-        grade: str | None = None,
+        knowledge_base_id: str,
         user_id: str | None = None,
         session_id: str | None = None,
         stream: bool = False,
@@ -96,11 +54,11 @@ class RAGService:
         start_time = time.time()
         logger.info(f"========== RAG 问答开始 ==========")
         logger.info(f"问题: {query[:100]}")
-        logger.info(f"过滤条件: subject={subject}, grade={grade}, user_id={user_id}")
+        logger.info(f"过滤条件: knowledge_base_id={knowledge_base_id}, user_id={user_id}")
 
         session_id = self.resolve_session_id(session_id, user_id)
         logger.info("会话解析完成: session_id=%s", session_id)
-        initial_state = self._build_initial_state(query, subject, grade, session_id)
+        initial_state = self._build_initial_state(query, knowledge_base_id, session_id)
         config = {"configurable": {"thread_id": session_id}}
 
         try:
@@ -112,6 +70,7 @@ class RAGService:
                 "references": [],
                 "latency_ms": int((time.time() - start_time) * 1000),
                 "complexity": "",
+                "cache_hit": False,
                 "session_id": session_id,
             }
 
@@ -135,8 +94,7 @@ class RAGService:
                     user_id=user_id,
                     query=query,
                     answer=answer,
-                    subject=subject or "",
-                    grade=grade or "",
+                    knowledge_base_id=knowledge_base_id,
                     complexity=final_state.get("complexity", "medium"),
                     retrieved_chunks=references[:5],
                     latency_ms=elapsed,
@@ -149,8 +107,7 @@ class RAGService:
             answer=answer,
             references=references,
             final_state=final_state,
-            subject=subject,
-            grade=grade,
+            knowledge_base_id=knowledge_base_id,
             user_id=user_id,
             session_id=session_id,
             qa_record_id=record_id,
@@ -164,6 +121,7 @@ class RAGService:
             "references": references,
             "latency_ms": elapsed,
             "complexity": final_state.get("complexity", "medium"),
+            "cache_hit": final_state.get("retrieval_cache_hit", False),
             "record_id": record_id,
             "session_id": session_id,
         }
@@ -171,8 +129,7 @@ class RAGService:
     async def ask_stream(
         self,
         query: str,
-        subject: str | None = None,
-        grade: str | None = None,
+        knowledge_base_id: str,
         user_id: str | None = None,
         session_id: str | None = None,
     ) -> AsyncGenerator[bytes, None]:
@@ -189,7 +146,7 @@ class RAGService:
         start_time = time.time()
         logger.info(f"========== RAG 流式问答开始 ==========")
         logger.info(f"问题: {query[:100]}")
-        logger.info(f"过滤条件: subject={subject}, grade={grade}")
+        logger.info(f"过滤条件: knowledge_base_id={knowledge_base_id}")
 
         def _sse(event: str, data: dict) -> bytes:
             payload = f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
@@ -200,7 +157,7 @@ class RAGService:
 
         session_id = self.resolve_session_id(session_id, user_id)
         logger.info("流式会话解析完成: session_id=%s, queue_id=%s", session_id, queue_id)
-        initial_state = self._build_initial_state(query, subject, grade, session_id)
+        initial_state = self._build_initial_state(query, knowledge_base_id, session_id)
         initial_state["_queue_id"] = queue_id
         config = {"configurable": {"thread_id": session_id}}
 
@@ -263,10 +220,6 @@ class RAGService:
             final_answer = full_answer
             references = []
             final_complexity = ""
-        elif final_state.get("intent") == "chitchat":
-            final_answer = final_state.get("answer", full_answer)
-            references = []
-            final_complexity = "simple"
         else:
             final_answer = final_state.get("answer", full_answer)
             references = format_references(final_state.get("retrieved_docs", []))
@@ -282,8 +235,7 @@ class RAGService:
                     user_id=user_id,
                     query=query,
                     answer=final_answer,
-                    subject=subject or "",
-                    grade=grade or "",
+                    knowledge_base_id=knowledge_base_id,
                     complexity=final_complexity,
                     retrieved_chunks=references[:5],
                     latency_ms=elapsed,
@@ -297,8 +249,7 @@ class RAGService:
                 answer=final_answer,
                 references=references,
                 final_state=final_state,
-                subject=subject,
-                grade=grade,
+                knowledge_base_id=knowledge_base_id,
                 user_id=user_id,
                 session_id=session_id,
                 qa_record_id=record_id,
@@ -316,6 +267,7 @@ class RAGService:
             "references": references,
             "latency_ms": elapsed,
             "complexity": final_complexity,
+            "cache_hit": final_state.get("retrieval_cache_hit", False),
             "record_id": record_id,
             "session_id": session_id,
         })
@@ -325,8 +277,7 @@ class RAGService:
         user_id: str,
         query: str,
         answer: str,
-        subject: str,
-        grade: str,
+        knowledge_base_id: str,
         complexity: str,
         retrieved_chunks: list,
         latency_ms: int,
@@ -338,8 +289,7 @@ class RAGService:
                 user_id=user_id,
                 query=query,
                 answer=answer,
-                subject=subject,
-                grade=grade,
+                knowledge_base_id=knowledge_base_id,
                 complexity=complexity,
                 retrieved_chunks=retrieved_chunks,
                 latency_ms=latency_ms,
@@ -357,7 +307,7 @@ class RAGService:
         final_state: dict,
     ) -> bool:
         """判断本轮问答是否可沉淀为自动评估样本。"""
-        if final_state.get("intent") != "educational":
+        if final_state.get("intent") != "knowledge_query":
             return False
         if final_state.get("retrieval_decision", {}).get("action") != "accept":
             return False
@@ -372,8 +322,7 @@ class RAGService:
         answer: str,
         references: list[dict],
         final_state: dict,
-        subject: str | None,
-        grade: str | None,
+        knowledge_base_id: str,
         user_id: str | None,
         session_id: str,
         qa_record_id: str | None,
@@ -395,8 +344,7 @@ class RAGService:
                     question=query,
                     answer=answer,
                     contexts=contexts,
-                    subject=subject or "",
-                    grade=grade or "",
+                    knowledge_base_id=knowledge_base_id,
                     complexity=final_state.get("complexity", "medium"),
                     session_id=session_id,
                     user_id=user_id,

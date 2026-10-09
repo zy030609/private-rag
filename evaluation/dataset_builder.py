@@ -29,7 +29,7 @@ class EvalDatasetBuilder:
     @staticmethod
     async def from_db(
         limit: int = 100,
-        subject: str | None = None,
+        knowledge_base_id: str | None = None,
         user_id: str | None = None,
         min_feedback: int | None = None,
     ) -> Dataset:
@@ -37,15 +37,15 @@ class EvalDatasetBuilder:
 
         Args:
             limit: 最多提取的记录数
-            subject: 按学科过滤
+            knowledge_base_id: 按知识库过滤
             user_id: 按用户过滤
             min_feedback: 1 仅好评, -1 仅差评, None 全部
         """
         session_maker = get_session_maker()
         async with session_maker() as session:
             query = select(QARecord).order_by(QARecord.created_at.desc()).limit(limit)
-            if subject:
-                query = query.where(QARecord.subject == subject)
+            if knowledge_base_id:
+                query = query.where(QARecord.knowledge_base_id == knowledge_base_id)
             if user_id:
                 query = query.where(QARecord.user_id == user_id)
             if min_feedback is not None:
@@ -116,17 +116,14 @@ class EvalDatasetBuilder:
     @staticmethod
     async def from_auto_samples(
         limit: int = 50,
-        subject: str | None = None,
-        grade: str | None = None,
+        knowledge_base_id: str | None = None,
     ) -> Dataset:
         """从 auto_eval_samples 表读取最近的成功 RAG 问答样本。"""
         session_maker = get_session_maker()
         async with session_maker() as session:
             query = select(AutoEvalSample)
-            if subject:
-                query = query.where(AutoEvalSample.subject == subject)
-            if grade:
-                query = query.where(AutoEvalSample.grade == grade)
+            if knowledge_base_id:
+                query = query.where(AutoEvalSample.knowledge_base_id == knowledge_base_id)
             query = query.order_by(AutoEvalSample.created_at.desc()).limit(limit)
             records = (await session.execute(query)).scalars().all()
 

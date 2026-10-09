@@ -17,7 +17,7 @@ from core.strategies import (
     multi_query_fusion,
     select_strategy,
 )
-from core.vectorestore import K12VectorStore
+from core.vectorestore import PrivateDocumentVectorStore
 from utils.logger import logger
 
 
@@ -38,7 +38,7 @@ def _annotate(docs: list[dict], strategy: str, query_variant: str) -> list[dict]
 
 
 def _search(
-    vector_store: K12VectorStore,
+    vector_store: PrivateDocumentVectorStore,
     *,
     query: str,
     subject: str | None,
@@ -52,7 +52,7 @@ def _search(
 
 
 def _direct_retrieve(
-    vector_store: K12VectorStore,
+    vector_store: PrivateDocumentVectorStore,
     query: str,
     complexity: str,
     subject: str | None = None,
@@ -72,7 +72,7 @@ def _direct_retrieve(
 
 
 async def _multi_query_retrieve(
-    vector_store: K12VectorStore,
+    vector_store: PrivateDocumentVectorStore,
     query: str,
     complexity: str,
     subject: str | None = None,
@@ -101,7 +101,7 @@ async def _multi_query_retrieve(
 
 
 async def _decomposition_retrieve(
-    vector_store: K12VectorStore,
+    vector_store: PrivateDocumentVectorStore,
     query: str,
     complexity: str,
     subject: str | None = None,
@@ -196,7 +196,7 @@ async def build_retry_plan(
 
 
 async def _retrieve_from_plan(
-    vector_store: K12VectorStore,
+    vector_store: PrivateDocumentVectorStore,
     *,
     query: str,
     plan: dict,
@@ -231,7 +231,7 @@ async def _retrieve_from_plan(
 
 
 async def _retrieve_complex_repair(
-    vector_store: K12VectorStore,
+    vector_store: PrivateDocumentVectorStore,
     *,
     plan: dict,
     subject: str | None,
@@ -288,10 +288,11 @@ async def _retrieve_complex_repair(
 
 
 async def hybrid_retrieve(
-    vector_store: K12VectorStore,
+    vector_store: PrivateDocumentVectorStore,
     query: str,
     complexity: str,
-    intent: str = "educational",
+    intent: str = "knowledge_query",
+    knowledge_base_id: str | None = None,
     subject: str | None = None,
     grade: str | None = None,
     *,
@@ -299,6 +300,8 @@ async def hybrid_retrieve(
     candidate_top_k: int | None = None,
 ) -> tuple[list[dict], list[str]]:
     """召回候选文档；在线质量判断会在重排后完成。"""
+    # subject 仅用于兼容上游调用，新链路统一传 knowledge_base_id。
+    subject = knowledge_base_id or subject
     limit = candidate_top_k or settings.RETRIEVAL_CANDIDATE_TOP_K
     plan = retrieval_plan or {"strategy": "initial", "queries": [query]}
     if plan.get("strategy") == "complex_repair":

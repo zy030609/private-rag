@@ -82,14 +82,14 @@ def _trim_messages(messages: list[BaseMessage], max_tokens: int) -> list[BaseMes
     return system + [last]
 
 # 系统 Prompt 模板 —— 约束 LLM 仅基于检索内容回答
-SYSTEM_PROMPT_TEMPLATE = """你是一个专业的 K12 教育助手，名叫"知学助手"。
-请根据以下提供的参考资料，回答学生的问题。
+SYSTEM_PROMPT_TEMPLATE = """你是一个严谨的私有文档知识库助手。
+请根据以下参考资料回答用户的问题。
 
 ## 要求
 1. 仅基于参考资料中的内容回答，不要编造事实
 2. 如果参考资料不足以回答问题，请明确说明"参考资料中未找到相关信息"
-3. 回答要简明易懂，适合 K12 学生的认知水平
-4. 适当举例说明，帮助理解
+3. 回答应清晰、准确，并保留资料中的关键条件和限定
+4. 不要使用参考资料之外的常识补全缺失信息
 5. 在回答末尾标注引用的参考来源序号（如 [1][2]）
 
 ## 参考资料
@@ -99,7 +99,7 @@ SYSTEM_PROMPT_TEMPLATE = """你是一个专业的 K12 教育助手，名叫"知�
 {query}
 """
 
-SUB_ANSWER_SYSTEM = """你是一个严谨的 K12 教育助手。
+SUB_ANSWER_SYSTEM = """你是一个严谨的私有文档知识库助手。
 请只根据参考资料回答当前子问题，不要扩展到原问题之外。
 如果资料不足，请直接说明该子问题资料不足。"""
 
@@ -111,7 +111,7 @@ SUB_ANSWER_PROMPT = """## 子问题
 
 请用 2-5 句话回答该子问题，并尽量保留关键条件、公式或概念。"""
 
-SYNTHESIS_SYSTEM = """你是一个专业的 K12 教育助手，擅长把多个子问题的答案合成为清晰、完整的总回答。
+SYNTHESIS_SYSTEM = """你是一个专业的私有文档知识库助手，擅长把多个子问题的答案合成为清晰、完整的总回答。
 请严格基于子问题答案和参考资料作答，不要编造事实。"""
 
 SYNTHESIS_PROMPT = """## 原问题
@@ -126,7 +126,7 @@ SYNTHESIS_PROMPT = """## 原问题
 请将以上子问题答案合成为对原问题的完整回答：
 1. 先直接回应原问题
 2. 再按逻辑说明每个关键点
-3. 对 K12 学生保持简明易懂
+3. 保持表达清晰、准确、结构化
 4. 资料不足的部分要明确说明
 5. 末尾标注可对应的参考来源序号（如 [1][2]）"""
 
@@ -282,7 +282,7 @@ async def llm_generate_stream(
     """
     流式调用 LLM，逐个 token 产出回答内容。
 
-    system_prompt: 自定义系统提示词，不传则使用默认的 K12 教育模板
+    system_prompt: 自定义系统提示词，不传则使用默认的私有知识库模板
     conversation_history: 历史对话 [{"role": ..., "content": ...}]
     """
     if not settings.LLM_API_KEY:
@@ -336,7 +336,7 @@ def _mock_answer(query: str, context_docs: list[dict]) -> str:
     简单提取上下文中的片段作为回答，方便测试流程。
     """
     if not context_docs:
-        return "抱歉，未找到与该问题相关的参考资料。请尝试换个问法，或联系老师添加相关知识库内容。"
+        return "当前知识库中没有找到与该问题相关的参考资料。请尝试换个问法或补充文档。"
 
     parts = [f"根据检索到的资料，以下是与「{query}」相关的信息：\n"]
     for i, doc in enumerate(context_docs[:3]):

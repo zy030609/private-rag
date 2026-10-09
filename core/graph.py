@@ -1,4 +1,4 @@
-"""K12 RAG 的 LangGraph 编排入口。
+"""通用私有文档 RAG 的 LangGraph 编排入口。
 
 图中只保存可序列化状态；向量库、重排器等运行时对象通过闭包注入节点，
 避免被 LangGraph checkpointer 持久化。
@@ -13,19 +13,19 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
 from config import settings
-from core.nodes.chitchat import chitchat_node
 from core.nodes.generator import generate_sub_answers, llm_generate_stream, synthesize_final_answer
-from core.nodes.query_classifier import classify_intent_async, classify_query_with_fallback
+from core.nodes.query_classifier import classify_query_with_fallback
 from core.nodes.retriever import build_retry_plan, hybrid_retrieve
 from core.reranker import CrossEncoderReranker, RerankerUnavailableError
 from core.retrieval_quality import evaluate_retrieval_gate
+from core.redis_cache import RedisRetrievalCache
 from core.state import MAX_ROUNDS, RAGState
 from core.stream_queue import stream_queues
-from core.vectorestore import K12VectorStore
+from core.vectorestore import PrivateDocumentVectorStore
 from utils.logger import logger
 
 
-ABSTAIN_ANSWER = "抱歉，我暂时没有检索到足够可靠的资料来回答这个问题。你可以补充教材范围、年级或更具体的问题。"
+ABSTAIN_ANSWER = "当前知识库中没有检索到足够可靠的依据，暂时无法回答该问题。你可以补充文档或换一种问法。"
 
 
 async def finalize_node(state: RAGState) -> dict:
@@ -43,30 +43,69 @@ async def finalize_node(state: RAGState) -> dict:
 
 
 async def classify_node(state: RAGState) -> dict:
-    """意图与复杂度分类节点。非教育问题直接转闲聊分支。"""
-    intent = await classify_intent_async(state["query"])
-    complexity = await classify_query_with_fallback(state["query"]) if intent == "educational" else "simple"
+    """仅判断检索复杂度；所有问题都进入指定知识库的 RAG 链路。"""
+    complexity = await classify_query_with_fallback(state["query"])
     logger.info(
         "classify: intent=%s, complexity=%s, query=%s",
-        intent,
+        "knowledge_query",
         complexity,
         state["query"][:50],
     )
-    return {"intent": intent, "complexity": complexity}
+    return {"intent": "knowledge_query", "complexity": complexity}
 
-async def retrieve_node(state: RAGState, vector_store: K12VectorStore) -> dict:
+async def retrieve_node(
+    state: RAGState,
+    vector_store: PrivateDocumentVectorStore,
+    retrieval_cache: RedisRetrievalCache | None = None,
+) -> dict:
     """候选召回节点：只负责召回，不在这里做质量判断。"""
     started = time.perf_counter()
+    knowledge_base_id = state.get("knowledge_base_id", "")
+    retrieval_plan = state.get("retrieval_plan", {})
+    if retrieval_cache is not None:
+        cached = await retrieval_cache.get_retrieval(
+            knowledge_base_id=knowledge_base_id,
+            query=state["query"],
+            complexity=state["complexity"],
+            retrieval_plan=retrieval_plan,
+            candidate_top_k=settings.RETRIEVAL_CANDIDATE_TOP_K,
+        )
+        if cached is not None:
+            docs = cached.get("documents", [])
+            sub_queries = cached.get("sub_queries", [])
+            latency_ms = round((time.perf_counter() - started) * 1000, 3)
+            logger.info(
+                "retrieve: cache_hit=true, candidates=%d, sub_queries=%d, latency_ms=%.3f",
+                len(docs),
+                len(sub_queries),
+                latency_ms,
+            )
+            return {
+                "retrieved_docs": docs,
+                "retrieval_latency_ms": latency_ms,
+                "retrieval_cache_hit": True,
+                "sub_queries": sub_queries,
+            }
+
     docs, sub_queries = await hybrid_retrieve(
         vector_store=vector_store,
         query=state["query"],
         complexity=state["complexity"],
-        intent=state.get("intent", "educational"),
-        subject=state.get("subject"),
-        grade=state.get("grade"),
-        retrieval_plan=state.get("retrieval_plan"),
+        intent="knowledge_query",
+        knowledge_base_id=knowledge_base_id,
+        retrieval_plan=retrieval_plan,
         candidate_top_k=settings.RETRIEVAL_CANDIDATE_TOP_K,
     )
+    if retrieval_cache is not None:
+        await retrieval_cache.set_retrieval(
+            knowledge_base_id=knowledge_base_id,
+            query=state["query"],
+            complexity=state["complexity"],
+            retrieval_plan=retrieval_plan,
+            candidate_top_k=settings.RETRIEVAL_CANDIDATE_TOP_K,
+            documents=docs,
+            sub_queries=sub_queries,
+        )
     latency_ms = round((time.perf_counter() - started) * 1000, 3)
     logger.info(
         "retrieve: plan=%s, candidates=%d, sub_queries=%d, latency_ms=%.3f",
@@ -78,6 +117,7 @@ async def retrieve_node(state: RAGState, vector_store: K12VectorStore) -> dict:
     return {
         "retrieved_docs": docs,
         "retrieval_latency_ms": latency_ms,
+        "retrieval_cache_hit": False,
         "sub_queries": sub_queries,
     }
 
@@ -308,8 +348,9 @@ def _route_by_gate(state: RAGState) -> Literal["accept", "retry", "abstain"]:
 
 
 def build_rag_graph(
-    vector_store: K12VectorStore,
+    vector_store: PrivateDocumentVectorStore,
     reranker: CrossEncoderReranker | None = None,
+    retrieval_cache: RedisRetrievalCache | None = None,
     *,
     checkpointer=None,
 ):
@@ -323,7 +364,7 @@ def build_rag_graph(
     )
 
     async def retrieve_with_store(state: RAGState) -> dict:
-        return await retrieve_node(state, vector_store)
+        return await retrieve_node(state, vector_store, retrieval_cache)
 
     async def rerank_with_model(state: RAGState) -> dict:
         return await rerank_node(state, reranker)
@@ -336,14 +377,9 @@ def build_rag_graph(
     workflow.add_node("retry_planner", retry_planner_node)
     workflow.add_node("generate", generate_node)
     workflow.add_node("abstain", abstain_node)
-    workflow.add_node("chitchat", chitchat_node)
     workflow.add_node("finalize", finalize_node)
     workflow.set_entry_point("classify")
-    workflow.add_conditional_edges(
-        "classify",
-        lambda state: "retrieve" if state.get("intent") == "educational" else "chitchat",
-        {"retrieve": "retrieve", "chitchat": "chitchat"},
-    )
+    workflow.add_edge("classify", "retrieve")
     workflow.add_edge("retrieve", "rerank")
     workflow.add_edge("rerank", "retrieval_gate")
     workflow.add_conditional_edges(
@@ -354,6 +390,5 @@ def build_rag_graph(
     workflow.add_edge("retry_planner", "retrieve")
     workflow.add_edge("generate", "finalize")
     workflow.add_edge("abstain", "finalize")
-    workflow.add_edge("chitchat", "finalize")
     workflow.add_edge("finalize", END)
     return workflow.compile(checkpointer=MemorySaver() if checkpointer is None else checkpointer)

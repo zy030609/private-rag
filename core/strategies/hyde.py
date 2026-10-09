@@ -2,10 +2,10 @@
 from core.strategies._llm import llm_complete
 from utils.logger import logger
 
-HYDE_SYSTEM = """你是一个 K12 教育助手。请针对用户的问题，写一段假设性的标准答案。
+HYDE_SYSTEM = """你是一个知识库检索助手。请针对用户的问题，写一段用于语义检索的假设性答案。
 
 要求：
-1. 内容应像教科书或教辅资料中的标准解释
+1. 内容应像知识库原文中的准确说明
 2. 包含关键概念和知识点
 3. 即使不确定细节，也尽量写出合理的假设性答案
 4. 长度控制在 100-200 字

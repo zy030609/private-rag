@@ -10,8 +10,8 @@ class StrategyType(Enum):
 
 def select_strategy(intent: str, complexity: str, query: str = "") -> StrategyType:
     """根据意图和复杂度选择主检索策略"""
-    # 非教育类一律直接检索
-    if intent != "educational":
+    # 非知识库查询兼容旧调用时使用直接检索。
+    if intent not in {"educational", "knowledge_query"}:
         return StrategyType.DIRECT
 
     # simple 查询直接检索

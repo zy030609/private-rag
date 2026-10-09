@@ -1,5 +1,5 @@
 """
-K12 教育 RAG 系统 — FastAPI 应用入口
+Private-RAG 通用私有文档问答系统 — FastAPI 应用入口
 
 启动方式:
     python main.py                 # 直接运行
@@ -29,49 +29,53 @@ class AppState:
     rag_graph: Any
     rag_service: Any
     document_service: Any
-    knowledge_service: Any
-    analytics_service: Any
+    knowledge_base_service: Any = None
+    redis_cache: Any = None
+    # 仅保留构造兼容性，不再初始化或注册原教育版服务。
+    knowledge_service: Any = None
+    analytics_service: Any = None
 
 
 def init_vector_store_sync():
     """
     同步初始化向量存储（Milvus Lite）。
     """
-    from core.vectorestore import K12VectorStore
+    from core.vectorestore import PrivateDocumentVectorStore
 
     logger.info("正在初始化向量存储（同步）...")
-    vs = K12VectorStore()
+    vs = PrivateDocumentVectorStore()
     stats = vs.collection_stats
     logger.info(f"向量存储就绪，当前数据量: {stats.get('row_count', 0)} 条")
     return vs
 
 
-def init_rag_graph_sync(vector_store):
+def init_rag_graph_sync(vector_store, redis_cache=None):
     """同步初始化 LangGraph 工作流"""
     from core.graph import build_rag_graph
 
     logger.info("正在构建 RAG 工作流...")
-    graph = build_rag_graph(vector_store)
+    graph = build_rag_graph(vector_store, retrieval_cache=redis_cache)
     logger.info("RAG 工作流构建完成")
     return graph
 
 
 def build_app_state(vector_store: Any | None = None, rag_graph: Any | None = None) -> AppState:
     """Build all runtime services for the app."""
-    from services.analytics_service import AnalyticsService
     from services.document_service import DocumentService
-    from services.knowledge_service import KnowledgeService
     from services.rag_service import RAGService
+    from services.knowledge_base_service import KnowledgeBaseService
+    from core.redis_cache import RedisRetrievalCache
 
     vector_store = vector_store or init_vector_store_sync()
-    rag_graph = rag_graph or init_rag_graph_sync(vector_store)
+    redis_cache = RedisRetrievalCache()
+    rag_graph = rag_graph or init_rag_graph_sync(vector_store, redis_cache)
     return AppState(
         vector_store=vector_store,
         rag_graph=rag_graph,
         rag_service=RAGService(vector_store, rag_graph),
-        document_service=DocumentService(vector_store),
-        knowledge_service=KnowledgeService(),
-        analytics_service=AnalyticsService(vector_store),
+        document_service=DocumentService(vector_store, retrieval_cache=redis_cache),
+        knowledge_base_service=KnowledgeBaseService(),
+        redis_cache=redis_cache,
     )
 
 
@@ -81,8 +85,10 @@ def attach_app_state(app: FastAPI, state: AppState) -> None:
     app.state.rag_graph = state.rag_graph
     app.state.rag_service = state.rag_service
     app.state.document_service = state.document_service
-    app.state.knowledge_service = state.knowledge_service
-    app.state.analytics_service = state.analytics_service
+    app.state.knowledge_base_service = state.knowledge_base_service or __import__(
+        "services.knowledge_base_service", fromlist=["KnowledgeBaseService"]
+    ).KnowledgeBaseService()
+    app.state.redis_cache = state.redis_cache
 
 
 async def init_database():
@@ -96,11 +102,12 @@ async def init_database():
 
 def register_routers(app: FastAPI) -> None:
     """注册 API 路由"""
-    from api import documents, evaluation, rag
+    from api import documents, evaluation, knowledge_bases, rag
     # from api import analytics, knowledge  # 暂未开发完成，先隐藏
 
     app.include_router(rag.router)
     app.include_router(documents.router)
+    app.include_router(knowledge_bases.router)
     # app.include_router(knowledge.router)   # 知识点模块暂未完成
     # app.include_router(analytics.router)   # 学情分析模块暂未完成
     app.include_router(evaluation.router)
@@ -117,10 +124,11 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         logger.info("=========================================")
-        logger.info("  K12 教育 RAG 系统 启动中...")
-        logger.info(f"  Milvus 模式: Lite (文件: {settings.MILVUS_URI})")
+        logger.info("  Private-RAG 通用私有文档问答系统启动中...")
+        logger.info(f"  Milvus 地址: {settings.MILVUS_URI}")
         logger.info(f"  Embedding 模型: {settings.EMBEDDING_MODEL}")
         logger.info(f"  LLM 模型: {settings.LLM_MODEL}")
+        logger.info(f"  Redis 缓存: {'启用' if settings.REDIS_ENABLED else '关闭'}")
         logger.info(f"  日志级别: {settings.LOG_LEVEL}")
         logger.info("=========================================")
 
@@ -135,11 +143,14 @@ def create_app(
         logger.info("系统启动完成，等待请求...")
         yield
         logger.info("系统关闭中...")
+        redis_cache = getattr(app.state, "redis_cache", None)
+        if redis_cache is not None:
+            await redis_cache.close()
 
     app = FastAPI(
-        title="K12 教育 RAG 系统",
-        description="基于 RAG 技术的 K12 教育知识库问答系统，支持文档管理、智能问答、学情分析等功能。",
-        version="1.0.0",
+        title="Private-RAG 私有文档问答系统",
+        description="基于 FastAPI、LangGraph 与混合检索的多知识库私有文档问答系统。",
+        version="2.0.0",
         lifespan=lifespan,
     )
 
@@ -157,12 +168,12 @@ def create_app(
     @app.get("/")
     async def root():
         """返回 UI 界面"""
-        html_path = os.path.join(os.path.dirname(__file__), "static", "index.html")
+        html_path = os.path.join(os.path.dirname(__file__), "static", "private.html")
         if os.path.exists(html_path):
             return FileResponse(html_path)
         return {
-            "app": "K12 教育 RAG 系统",
-            "version": "1.0.0",
+            "app": "Private-RAG 私有文档问答系统",
+            "version": "2.0.0",
             "status": "running",
             "docs": "/docs",
         }
@@ -179,6 +190,9 @@ def create_app(
                 "status": "healthy",
                 "vector_store": stats,
                 "llm_configured": bool(settings.LLM_API_KEY),
+                "redis": await request.app.state.redis_cache.health()
+                if getattr(request.app.state, "redis_cache", None) is not None
+                else {"enabled": False, "connected": False},
             }
         except Exception as e:
             return {"status": "unhealthy", "error": str(e)}

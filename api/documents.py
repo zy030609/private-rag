@@ -23,9 +23,8 @@ def get_document_service(request: Request):
 async def upload_document(
     request: Request,
     file: UploadFile = File(..., description="待上传的文件"),
-    subject: str = Form(..., description="学科"),
-    grade: str = Form("", description="年级"),
-    chapter: str = Form("", description="章节"),
+    knowledge_base_id: str = Form(..., description="知识库 ID"),
+    tags: str = Form("", description="逗号分隔的标签"),
     strategy: str = Form("recursive", description="切片策略"),
 ):
     """上传文档并自动处理入库（PDF/MD/TXT）"""
@@ -38,19 +37,20 @@ async def upload_document(
     if not any(file.filename.lower().endswith(ext) for ext in allowed_ext):
         raise HTTPException(status_code=400, detail=f"不支持的文件类型，仅支持: {allowed_ext}")
 
-    logger.info(f"上传文档: {file.filename}, subject={subject}, grade={grade}")
+    logger.info(f"上传文档: {file.filename}, knowledge_base_id={knowledge_base_id}")
 
     try:
         content = await file.read()
         result = await document_service.upload_and_process(
             file_content=content,
             filename=file.filename,
-            subject=subject,
-            grade=grade,
-            chapter=chapter,
+            knowledge_base_id=knowledge_base_id,
+            tags=[item.strip() for item in tags.split(",") if item.strip()],
             strategy=strategy,
         )
         return DocumentUploadResponse(data=result)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
     except Exception as e:
         logger.error(f"文档上传处理失败: {e}")
         return DocumentUploadResponse(code=500, message=f"处理失败: {str(e)}")
@@ -67,15 +67,14 @@ async def import_sql(req: SQLImportRequest, request: Request):
     if not req.table_name:
         raise HTTPException(status_code=400, detail="table_name 不能为空")
 
-    logger.info(f"SQL 导入: table={req.table_name}, subject={req.subject}, db={req.db_url.split('@')[-1] if '@' in req.db_url else req.db_url}")
+    logger.info(f"SQL 导入: table={req.table_name}, knowledge_base_id={req.knowledge_base_id}, db={req.db_url.split('@')[-1] if '@' in req.db_url else req.db_url}")
 
     try:
         result = await document_service.import_from_sql(
             db_url=req.db_url,
             table_name=req.table_name,
-            subject=req.subject,
-            grade=req.grade,
-            chapter=req.chapter,
+            knowledge_base_id=req.knowledge_base_id,
+            tags=req.tags,
             field_map=req.field_map,
             id_column=req.id_column,
             columns=req.columns,
@@ -90,10 +89,10 @@ async def import_sql(req: SQLImportRequest, request: Request):
 
 
 @router.get("/list", response_model=DocumentListResponse)
-async def list_documents(request: Request):
+async def list_documents(request: Request, knowledge_base_id: str | None = None):
     """获取文档列表"""
     document_service = get_document_service(request)
-    docs = await document_service.list_documents()
+    docs = await document_service.list_documents(knowledge_base_id)
     return DocumentListResponse(data=docs, total=len(docs))
 
 

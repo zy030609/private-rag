@@ -18,7 +18,7 @@ from datasets import Dataset
 
 from config import settings
 from core.graph import build_rag_graph
-from core.vectorestore import K12VectorStore
+from core.vectorestore import PrivateDocumentVectorStore
 from evaluation.ragas_evaluator import RAGASEvaluator
 from evaluation.schemas import EvalResult, eval_result_to_dict, sanitize_for_json_storage
 from models.db_models import EvaluationRecord, get_session_maker
@@ -95,9 +95,8 @@ async def run_evaluation(
 
 async def run_live_evaluation(
     questions: list[str],
-    vector_store: K12VectorStore,
-    subject: str | None = None,
-    grade: str | None = None,
+    vector_store: PrivateDocumentVectorStore,
+    knowledge_base_id: str = "",
     metrics: list[str] | None = None,
     name: str = "live_eval",
     ground_truths: list[str | None] | None = None,
@@ -120,8 +119,7 @@ async def run_live_evaluation(
         logger.info("[%d/%d] 问答: %s", i + 1, len(questions), q[:80])
         resp = await service.ask(
             query=q,
-            subject=subject,
-            grade=grade,
+            knowledge_base_id=knowledge_base_id,
             user_id="__evaluator__",
         )
         answers.append(resp.get("answer", ""))
